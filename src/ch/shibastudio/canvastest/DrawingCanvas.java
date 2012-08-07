@@ -3,6 +3,8 @@ package ch.shibastudio.canvastest;
 import java.util.ArrayList;
 
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.Bitmap.Config;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -16,14 +18,18 @@ import android.view.View;
 
 public class DrawingCanvas extends View{
 	private final float STROKE_WIDTH = 10f;
+	private final float MIN_DISTANCE = 0.5f;
 	
 	private Paint mPaint;
-	private ArrayList<Line> mLines;
 	private Line mCrntLine;
+	private Point mPreviousPoint;
+	private ArrayList<Path> mPreviousLines;
+	private Path mCrntPath;
+	private Bitmap mCache;
 	
 	public DrawingCanvas(Context c){
 		super(c);
-		mLines = new ArrayList<Line>();
+		mPreviousLines = new ArrayList<Path>();
 		mPaint = new Paint();
 		mPaint.setStrokeCap(Cap.ROUND);
 		mPaint.setStrokeJoin(Join.ROUND);
@@ -36,47 +42,11 @@ public class DrawingCanvas extends View{
 	public void onDraw(Canvas c){
 		super.onDraw(c);
 		c.drawColor(Color.WHITE);
-		
-		//drawFreeHand(c);
-		drawTest(c);
+		drawSmoothed(c);
 	}
 	
 	// -- Interpolation -----------------------------------------------------------------
-	/*
-	 * static class DrawingUtility
-{
-    // linear equation solver utility for ai + bj = c and di + ej = f
-    static void solvexy(double a, double b, double c, double d, double e, double f, out double i, out double j)
-    {
-        j = (c - a / d * f) / (b - a * e / d);
-        i = (c - (b * j)) / a;
-    }
 
-    static void bez4pts1(double x0, double y0, double x4, double y4, double x5, double y5, double x3, double y3, out double x1, out double y1, out double x2, out double y2)
-    {
-        // find chord lengths
-        double c1 = Math.Sqrt((x4 - x0) * (x4 - x0) + (y4 - y0) * (y4 - y0));
-        double c2 = Math.Sqrt((x5 - x4) * (x5 - x4) + (y5 - y4) * (y5 - y4));
-        double c3 = Math.Sqrt((x3 - x5) * (x3 - x5) + (y3 - y5) * (y3 - y5));
-        // guess "best" t
-        double t1 = c1 / (c1 + c2 + c3);
-        double t2 = (c1 + c2) / (c1 + c2 + c3);
-        // transform x1 and x2
-        solvexy(b1(t1), b2(t1), x4 - (x0 * b0(t1)) - (x3 * b3(t1)), b1(t2), b2(t2), x5 - (x0 * b0(t2)) - (x3 * b3(t2)), out x1, out x2);
-        // transform y1 and y2
-        solvexy(b1(t1), b2(t1), y4 - (y0 * b0(t1)) - (y3 * b3(t1)), b1(t2), b2(t2), y5 - (y0 * b0(t2)) - (y3 * b3(t2)), out y1, out y2);
-    }
-
-    static public PathFigure BezierFromIntersection(Point startPt, Point int1, Point int2, Point endPt)
-    {
-        double x1, y1, x2, y2;
-        bez4pts1(startPt.X, startPt.Y, int1.X, int1.Y, int2.X, int2.Y, endPt.X, endPt.Y, out x1, out y1, out x2, out y2);
-        PathFigure p = new PathFigure { StartPoint = startPt };
-        p.Segments.Add(new BezierSegment { Point1 = new Point(x1, y1), Point2 = new Point(x2, y2), Point3 = endPt } );
-        return p;
-    }
-}
-	 * */
 	private double b0(double t){
 		return Math.pow(1-t, 3);
 	}
@@ -126,78 +96,105 @@ public class DrawingCanvas extends View{
 	
 	// -- Interpolation -----------------------------------------------------------------
 	
-	
-	public void drawTest(Canvas c){
-		ArrayList<Point> pts = new ArrayList<Point>();
-		pts.add(new Point(100, 100));
-		pts.add(new Point(320, 230));
-		pts.add(new Point(400, 520));
-		pts.add(new Point(630, 410));
-		
-		mPaint.setColor(Color.RED);
-		for(int i=0; i<pts.size(); i++){
-			Point p = pts.get(i);
-			c.drawCircle(p.x, p.y, 5f, mPaint);
+	private void generateCurrentPath(){
+		if(null != mCrntLine){
+			mCrntPath = new Path();
+			mCrntPath.moveTo(mCrntLine.points.get(0).x, mCrntLine.points.get(0).y);
+			
+			int nPts = mCrntLine.points.size();
+			if(1 == nPts){
+				Point pn = mCrntLine.points.get(0);
+				mCrntPath.lineTo(pn.x, pn.y);
+			}else if(4 > nPts){
+				for(int i=1; i<nPts; i++){
+					Point pn = mCrntLine.points.get(i);
+					mCrntPath.lineTo(pn.x, pn.y);
+				}
+			}else{
+				Point c0;
+				Point c1 = new Point();
+				for(int i=3; i<nPts; i+=4){
+					Point p0 = mCrntLine.points.get(i-3);
+					Point p1 = mCrntLine.points.get(i-2);
+					Point p2 = mCrntLine.points.get(i-1);
+					Point p3 = mCrntLine.points.get(i);
+					
+					ArrayList<Point> cp = getControlPointsFrom(p0, p1, p2, p3);
+					
+					if(3 == i){
+						c0 = cp.get(0);
+					}else{
+						// c0 must be the inverse of the previous c1
+						c0 = new Point();
+						Point prevLast = mCrntLine.points.get(i-4);
+						c0.x = prevLast.x + (prevLast.x - c1.x);
+						c0.y = prevLast.y + (prevLast.y - c1.y);
+					}
+					c1 = cp.get(1);
+					
+					mCrntPath.cubicTo(c0.x, c0.y, c1.x, c1.y, p3.x, p3.y);
+				}
+			}
 		}
-		mPaint.setColor(Color.BLACK);
-		mPaint.setStrokeWidth(3f);
-		
-		ArrayList<Point> cp = getControlPointsFrom(pts.get(0), pts.get(1), pts.get(2), pts.get(3));
-		Path p = new Path();
-		p.moveTo(pts.get(0).x, pts.get(0).y);
-		p.cubicTo(cp.get(0).x, cp.get(0).y, cp.get(1).x, cp.get(1).y, pts.get(3).x, pts.get(3).y);
-		c.drawPath(p, mPaint);
-		
 	}
 	
-	private void drawFreeHand(Canvas c){
-		if(!mLines.isEmpty()){
-			for(int i=0; i<mLines.size(); i++){
-				Line l = mLines.get(i);
-				Path p = new Path();
-				p.moveTo(l.points.get(0).x, l.points.get(0).y);
-				for(int j=1; j<l.points.size(); j++){
-					Point p1 = l.points.get(j);
-					p.lineTo(p1.x, p1.y);
-				}
-				//p.close();
-				c.drawPath(p, mPaint);
-			}
+	public void drawSmoothed(Canvas c){
+		// Render the previous lines
+		/*for(int i=0; i<mPreviousLines.size(); i++){
+			c.drawPath(mPreviousLines.get(i), mPaint);
+		}*/
+		if(null != mCache){
+			c.drawBitmap(mCache, 0, 0, mPaint);
 		}
 		
-		if(null != mCrntLine){
-			Path p = new Path();
-			p.moveTo(mCrntLine.points.get(0).x, mCrntLine.points.get(0).y);
-			for(int k=1; k<mCrntLine.points.size(); k++){
-				Point p1 = mCrntLine.points.get(k);
-
-				p.lineTo(p1.x, p1.y);
-			}
-			//p.close();
-			c.drawPath(p, mPaint);
+		// Render the current line
+		if(null != mCrntPath){
+			c.drawPath(mCrntPath, mPaint);
 		}	
+	}
+	
+	private void refreshCache(){
+		mCache = Bitmap.createBitmap(getWidth(), getHeight(), Config.ARGB_8888);
+		Canvas cacheCanvas = new Canvas(mCache);
+		for(int i=0; i<mPreviousLines.size(); i++){
+			cacheCanvas.drawPath(mPreviousLines.get(i), mPaint);
+		}
 	}
 	
 	@Override
 	public boolean onTouchEvent(MotionEvent ev){
+		System.out.println("-- getting onTouchEvent --");
 		Point p;
 		switch(ev.getAction()){
 		case MotionEvent.ACTION_DOWN:
 			mCrntLine = new Line();
 			p = new Point(ev.getX(), ev.getY());
 			mCrntLine.addPoint(p);
+			generateCurrentPath();
+			mPreviousPoint = p;
 			break;
 				
 		case MotionEvent.ACTION_MOVE:
 			p = new Point(ev.getX(), ev.getY());
-			mCrntLine.addPoint(p);
+			if(Math.abs(mPreviousPoint.x - p.x) >= MIN_DISTANCE && Math.abs(mPreviousPoint.y - p.y) >= MIN_DISTANCE){
+				mCrntLine.addPoint(p);
+				generateCurrentPath();
+				mPreviousPoint = p;
+			}
 			break;
 			
 		case MotionEvent.ACTION_UP:
 			p = new Point(ev.getX(), ev.getY());
-			mCrntLine.addPoint(p);
-			mLines.add(mCrntLine);
+			if(Math.abs(mPreviousPoint.x - p.x) >= MIN_DISTANCE && Math.abs(mPreviousPoint.y - p.y) >= MIN_DISTANCE){
+				generateCurrentPath();
+				mCrntPath.lineTo(p.x, p.y);
+				mCrntLine.addPoint(p);
+				mPreviousPoint = p;
+			}
+			mPreviousLines.add(mCrntPath);
+			refreshCache();
 			mCrntLine = null;
+			mCrntPath = null;
 			break;
 			
 		default:
