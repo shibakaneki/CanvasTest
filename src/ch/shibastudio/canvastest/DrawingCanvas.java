@@ -12,18 +12,30 @@ import android.graphics.Paint.Cap;
 import android.graphics.Paint.Join;
 import android.graphics.Paint.Style;
 import android.graphics.Path;
-import android.graphics.Path.Direction;
 import android.view.MotionEvent;
 import android.view.View;
 
 public class DrawingCanvas extends View{
+	
+	private class ControlPoints{
+		public Point c0;
+		public Point c1;
+		
+		public ControlPoints(Point _c0, Point _c1){
+			c0 = _c0;
+			c1 = _c1;
+		}
+	}
+	
 	private final float STROKE_WIDTH = 10f;
 	private final float MIN_DISTANCE = 0.5f;
+	private final float SMOOTHING = 0.5f;
 	
 	private Paint mPaint;
 	private Line mCrntLine;
 	private Point mPreviousPoint;
 	private ArrayList<Path> mPreviousLines;
+	private ArrayList<ControlPoints> mCrntCtrlPts;
 	private Path mCrntPath;
 	private Bitmap mCache;
 	
@@ -46,103 +58,98 @@ public class DrawingCanvas extends View{
 	}
 	
 	// -- Interpolation -----------------------------------------------------------------
-
-	private double b0(double t){
-		return Math.pow(1-t, 3);
-	}
-	
-	private double b1(double t){
-		return t*(1-t)*(1-t)*3;
-	}
-	
-	private double b2(double t){
-		return (1-t)*t*t*3;
-	}
-	
-	private double b3(double t){
-		return Math.pow(t, 3);
-	}
-	
-	private ArrayList<Double> solvexy(double a, double b, double c, double d, double e, double f){
-		ArrayList<Double> coords = new ArrayList<Double>();
-		
-		double j = (c - a / d * f) / (b - a * e / d);
-        double i = (c - (b * j)) / a;
-		
-        coords.add(new Double(i));
-        coords.add(new Double(j));
-        
-		return coords;
-	}
-	
 	private ArrayList<Point> getControlPointsFrom(Point p0, Point p1, Point p2, Point p3){
 		ArrayList<Point> cp = new ArrayList<Point>();
 		
-		// Get chord lengths
-		double c1 = Math.sqrt((p1.x-p0.x)*(p1.x-p0.x)+(p1.y-p0.y)*(p1.y-p0.y));
-		double c2 = Math.sqrt((p2.x-p1.x)*(p2.x-p1.x)+(p2.y-p1.y)*(p2.y-p1.y));
-		double c3 = Math.sqrt((p3.x-p2.x)*(p3.x-p2.x)+(p3.y-p2.y)*(p3.y-p2.y));
+		double xc1 = (p0.x + p1.x) / 2.0;
+	    double yc1 = (p0.y + p1.y) / 2.0;
+	    double xc2 = (p1.x + p2.x) / 2.0;
+	    double yc2 = (p1.y + p2.y) / 2.0;
+	    double xc3 = (p2.x + p3.x) / 2.0;
+	    double yc3 = (p2.y + p3.y) / 2.0;
+
+	    double len1 = Math.sqrt((p1.x-p0.x) * (p1.x-p0.x) + (p1.y-p0.y) * (p1.y-p0.y));
+	    double len2 = Math.sqrt((p2.x-p1.x) * (p2.x-p1.x) + (p2.y-p1.y) * (p2.y-p1.y));
+	    double len3 = Math.sqrt((p3.x-p2.x) * (p3.x-p2.x) + (p3.y-p2.y) * (p3.y-p2.y));
+
+	    double k1 = len1 / (len1 + len2);
+	    double k2 = len2 / (len2 + len3);
+
+	    double xm1 = xc1 + (xc2 - xc1) * k1;
+	    double ym1 = yc1 + (yc2 - yc1) * k1;
+
+	    double xm2 = xc2 + (xc3 - xc2) * k2;
+	    double ym2 = yc2 + (yc3 - yc2) * k2;
+
+	    // Resulting control points. Here smooth_value is mentioned
+	    // above coefficient K whose value should be in range [0...1].
+	    Point c0 = new Point();
+	    Point c1 = new Point();
+	    c0.x = (float)(xm1 + (xc2 - xm1) * SMOOTHING + p1.x - xm1);
+	    c0.y = (float)(ym1 + (yc2 - ym1) * SMOOTHING + p1.y - ym1);
+
+	    c1.x = (float)(xm2 + (xc2 - xm2) * SMOOTHING + p2.x - xm2);
+	    c1.y = (float)(ym2 + (yc2 - ym2) * SMOOTHING + p2.y - ym2);
 		
-		double t1 = c1/(c1+c2+c3);
-		double t2 = (c1+c2)/(c1+c2+c3);
+		cp.add(c0);
+		cp.add(c1);
 		
-		ArrayList<Double> xCoords = solvexy(b1(t1), b2(t1), p1.x - (p0.x * b0(t1)) - (p3.x * b3(t1)), b1(t2), b2(t2), p2.x - (p0.x * b0(t2)) - (p3.x * b3(t2)));
-		ArrayList<Double> yCoords = solvexy(b1(t1), b2(t1), p1.y - (p0.y * b0(t1)) - (p3.y * b3(t1)), b1(t2), b2(t2), p2.y - (p0.y * b0(t2)) - (p3.y * b3(t2)));
-		
-		cp.add(new Point((float)xCoords.get(0).doubleValue(), (float)yCoords.get(0).doubleValue()));
-		cp.add(new Point((float)xCoords.get(1).doubleValue(), (float)yCoords.get(1).doubleValue()));
 		return cp;
 	}
 	
 	// -- Interpolation -----------------------------------------------------------------
 	
-	private void generateCurrentPath(){
+	private void generateCurrentPath(){	
 		if(null != mCrntLine){
 			mCrntPath = new Path();
 			mCrntPath.moveTo(mCrntLine.points.get(0).x, mCrntLine.points.get(0).y);
+			Point c0;
+			Point c1;
+			Point p0;
+			Point p1;
+			Point p2;
+			Point p3;
 			
 			int nPts = mCrntLine.points.size();
-			if(1 == nPts){
-				Point pn = mCrntLine.points.get(0);
-				mCrntPath.lineTo(pn.x, pn.y);
-			}else if(4 > nPts){
-				for(int i=1; i<nPts; i++){
-					Point pn = mCrntLine.points.get(i);
-					mCrntPath.lineTo(pn.x, pn.y);
+			int nPreviousCtrlPts = mCrntCtrlPts.size();
+			for(int i=0; i<nPreviousCtrlPts; i++){
+				c0 = mCrntCtrlPts.get(i).c0;
+				c1 = mCrntCtrlPts.get(i).c1;
+				p3 = mCrntLine.points.get(((i+1)*4)-1);
+				mCrntPath.cubicTo(c0.x, c0.y, c1.x, c1.y, p3.x, p3.y);
+			}
+			
+			int remainingPts = nPts - 4*nPreviousCtrlPts;
+			
+			if(4 > remainingPts){
+				for(int i=4*nPreviousCtrlPts; i<nPts; i++){
+					p3 = mCrntLine.points.get(i);
+					mCrntPath.lineTo(p3.x, p3.y);
 				}
 			}else{
-				Point c0;
-				Point c1 = new Point();
-				for(int i=3; i<nPts; i+=4){
-					Point p0 = mCrntLine.points.get(i-3);
-					Point p1 = mCrntLine.points.get(i-2);
-					Point p2 = mCrntLine.points.get(i-1);
-					Point p3 = mCrntLine.points.get(i);
-					
-					ArrayList<Point> cp = getControlPointsFrom(p0, p1, p2, p3);
-					
-					if(3 == i){
-						c0 = cp.get(0);
-					}else{
-						// c0 must be the inverse of the previous c1
-						c0 = new Point();
-						Point prevLast = mCrntLine.points.get(i-4);
-						c0.x = prevLast.x + (prevLast.x - c1.x);
-						c0.y = prevLast.y + (prevLast.y - c1.y);
-					}
-					c1 = cp.get(1);
-					
-					mCrntPath.cubicTo(c0.x, c0.y, c1.x, c1.y, p3.x, p3.y);
+				p0 = mCrntLine.points.get(4*nPreviousCtrlPts);
+				p1 = mCrntLine.points.get(4*nPreviousCtrlPts+1);
+				p2 = mCrntLine.points.get(4*nPreviousCtrlPts+2);
+				p3 = mCrntLine.points.get(4*nPreviousCtrlPts+3);
+				ArrayList<Point> cp = getControlPointsFrom(p0, p1, p2, p3);
+				if(0 < nPreviousCtrlPts){
+					c0 = new Point();
+					Point prevC1 = mCrntCtrlPts.get(nPreviousCtrlPts-1).c1;
+					Point prevLast = mCrntLine.points.get(nPreviousCtrlPts*4-1);
+					c0.x = prevLast.x + (prevLast.x - prevC1.x);
+					c0.y = prevLast.y + (prevLast.y - prevC1.y);
+				}else{
+					c0 = cp.get(0);
 				}
+				c1 = cp.get(1);
+				mCrntPath.cubicTo(c0.x, c0.y, c1.x, c1.y, p3.x, p3.y);
+				mCrntCtrlPts.add(new ControlPoints(c0, c1));
 			}
 		}
 	}
 	
 	public void drawSmoothed(Canvas c){
 		// Render the previous lines
-		/*for(int i=0; i<mPreviousLines.size(); i++){
-			c.drawPath(mPreviousLines.get(i), mPaint);
-		}*/
 		if(null != mCache){
 			c.drawBitmap(mCache, 0, 0, mPaint);
 		}
@@ -168,6 +175,7 @@ public class DrawingCanvas extends View{
 		switch(ev.getAction()){
 		case MotionEvent.ACTION_DOWN:
 			mCrntLine = new Line();
+			mCrntCtrlPts = new ArrayList<DrawingCanvas.ControlPoints>();
 			p = new Point(ev.getX(), ev.getY());
 			mCrntLine.addPoint(p);
 			generateCurrentPath();
@@ -177,24 +185,25 @@ public class DrawingCanvas extends View{
 		case MotionEvent.ACTION_MOVE:
 			p = new Point(ev.getX(), ev.getY());
 			if(Math.abs(mPreviousPoint.x - p.x) >= MIN_DISTANCE && Math.abs(mPreviousPoint.y - p.y) >= MIN_DISTANCE){
-				mCrntLine.addPoint(p);
-				generateCurrentPath();
+				mCrntLine.addPoint(p);		
 				mPreviousPoint = p;
 			}
+			generateCurrentPath();
 			break;
 			
 		case MotionEvent.ACTION_UP:
 			p = new Point(ev.getX(), ev.getY());
-			if(Math.abs(mPreviousPoint.x - p.x) >= MIN_DISTANCE && Math.abs(mPreviousPoint.y - p.y) >= MIN_DISTANCE){
+			//if(Math.abs(mPreviousPoint.x - p.x) >= MIN_DISTANCE && Math.abs(mPreviousPoint.y - p.y) >= MIN_DISTANCE){
 				generateCurrentPath();
 				mCrntPath.lineTo(p.x, p.y);
 				mCrntLine.addPoint(p);
 				mPreviousPoint = p;
-			}
+			//}
 			mPreviousLines.add(mCrntPath);
 			refreshCache();
 			mCrntLine = null;
 			mCrntPath = null;
+			mCrntCtrlPts = null;
 			break;
 			
 		default:
